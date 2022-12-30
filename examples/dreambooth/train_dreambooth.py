@@ -711,6 +711,7 @@ def main(args):
     import os
     import matplotlib.pyplot as plt
     import matplotlib.image as mpimg
+
     def generate_sample_grids(args):
         for prompt in args.save_sample_prompts:
             print(f"Generating sample grid for {prompt['name']}")
@@ -726,7 +727,7 @@ def main(args):
 
             scale = 4
             fig, axes = plt.subplots(row, col, figsize=(col*scale, row*scale), gridspec_kw={'hspace': 0, 'wspace': 0})
-            
+
             for i, folder in enumerate(folders):
                 image_folder = os.path.join(args.samples_dir, folder, prompt['name'])
                 images = [f for f in os.listdir(image_folder)]
@@ -743,11 +744,14 @@ def main(args):
                     img = mpimg.imread(image_path)
                     currAxes.imshow(img, cmap='gray')
                     currAxes.axis('off')
-                    
+
+            # set title with description
+            description = f"Experiment description: {args.exp_description}\nPrompt: {prompt['instance_prompt']}\nNegative Prompt: {prompt['negative_prompt']}\nLearning-rate:{args.learning_rate}\nLr-scheduler: {args.lr_scheduler}\nmax-train-step: {args.max_train_steps}"
+
+            fig.text(0.5, 0.99, description, ha='center', fontsize=12)
             plt.tight_layout()
             img_fn = os.path.join(args.samples_dir, prompt['name'] + ".png")
             plt.savefig(img_fn, dpi=72)
-
 
     def save_samples(args, global_step):
         if accelerator.is_main_process:
@@ -799,6 +803,8 @@ def main(args):
             with open(os.path.join(args.samples_dir, "args.json"), "w") as f:
                 json.dump(args.__dict__, f, indent=2)
             
+            with open(os.path.join(args.save_sample_prompts, "prompts.json"), "w") as f:
+                json.dump(args.__dict__, f, indent=2)
 
 
     # Only show the progress bar once on each machine.
