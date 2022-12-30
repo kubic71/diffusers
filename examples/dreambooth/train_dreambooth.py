@@ -17,7 +17,7 @@ from torch.utils.data import Dataset
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
-from diffusers import AutoencoderKL, DPMSolverMultistepScheduler, DDIMScheduler, DDPMScheduler, StableDiffusionPipeline, UNet2DConditionModel
+from diffusers import AutoencoderKL, DDIMScheduler, DDPMScheduler, StableDiffusionPipeline, UNet2DConditionModel
 from diffusers.optimization import get_scheduler
 from huggingface_hub import HfFolder, Repository, whoami
 from PIL import Image
@@ -84,24 +84,14 @@ def parse_args(input_args=None):
         default=None,
         help="The prompt to specify images in the same class as provided instance images.",
     )
+
     parser.add_argument(
-        "--save_sample_prompt",
+        "--exp_description",
         type=str,
-        default=None,
-        help="The prompt used to generate sample outputs to save.",
+        default="",
+        help="Description of the experiment"
     )
-    parser.add_argument(
-        "--save_sample_negative_prompt",
-        type=str,
-        default=None,
-        help="The negative prompt used to generate sample outputs to save.",
-    )
-    parser.add_argument(
-        "--n_save_sample",
-        type=int,
-        default=4,
-        help="The number of samples to save.",
-    )
+
     parser.add_argument(
         "--save_guidance_scale",
         type=float,
@@ -204,6 +194,16 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--lr_warmup_steps", type=int, default=500, help="Number of steps for the warmup in the lr scheduler."
     )
+    parser.add_argument(
+        "--save_sample_prompts", type=str, help="JSON contraining sample prompts"
+    )
+    parser.add_argument(
+        "--save_samples_interval", type=int, default=10000, help="Save prompt every..."
+    )
+    parser.add_argument(
+        "--samples_dir", type=str, default="/tmp", help="where to save samples"
+    )
+
     parser.add_argument(
         "--use_8bit_adam", action="store_true", help="Whether or not to use 8-bit Adam from bitsandbytes."
     )
@@ -434,6 +434,10 @@ def main(args):
     else:
         with open(args.concepts_list, "r") as f:
             args.concepts_list = json.load(f)
+    
+    # load save sample prompts JSON
+    with open(args.save_sample_prompts, "r") as f:
+        args.save_sample_prompts = json.load(f)
 
     if args.with_prior_preservation:
         pipeline = None
@@ -682,8 +686,7 @@ def main(args):
                 text_enc_model = accelerator.unwrap_model(text_encoder)
             else:
                 text_enc_model = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision)
-            scheduler = DPMSolverMultistepScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
-            # scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False, set_alpha_to_one=False)
+            scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False, set_alpha_to_one=False)
             pipeline = StableDiffusionPipeline.from_pretrained(
                 args.pretrained_model_name_or_path,
                 unet=accelerator.unwrap_model(unet),
@@ -703,26 +706,100 @@ def main(args):
             with open(os.path.join(save_dir, "args.json"), "w") as f:
                 json.dump(args.__dict__, f, indent=2)
 
-            if args.save_sample_prompt is not None:
-                pipeline = pipeline.to(accelerator.device)
-                g_cuda = torch.Generator(device=accelerator.device).manual_seed(args.seed)
-                pipeline.set_progress_bar_config(disable=True)
-                sample_dir = os.path.join(save_dir, "samples")
-                os.makedirs(sample_dir, exist_ok=True)
-                with torch.autocast("cuda"), torch.inference_mode():
-                    for i in tqdm(range(args.n_save_sample), desc="Generating samples"):
+            print(f"[*] Weights saved at {save_dir}")
+
+    import os
+    import matplotlib.pyplot as plt
+    import matplotlib.image as mpimg
+    def generate_sample_grids(args):
+        for prompt in args.save_sample_prompts:
+            print(f"Generating sample grid for {prompt['name']}")
+
+            folders = sorted([f for f in os.listdir(args.samples_dir) if os.path.isdir(os.path.join(args.samples_dir, f))], key=lambda x: int(x))
+
+            if len(folders) == 0:
+                return
+
+            row = len(folders)
+            col = len(os.listdir(os.path.join(args.samples_dir, folders[0], prompt["name"])))
+            assert col == prompt['num']
+
+            scale = 4
+            fig, axes = plt.subplots(row, col, figsize=(col*scale, row*scale), gridspec_kw={'hspace': 0, 'wspace': 0})
+            
+            for i, folder in enumerate(folders):
+                image_folder = os.path.join(args.samples_dir, folder, prompt['name'])
+                images = [f for f in os.listdir(image_folder)]
+                for j, image in enumerate(images):
+                    if row == 1:
+                        currAxes = axes[j]
+                    else:
+                        currAxes = axes[i, j]
+                    if i == 0:
+                        currAxes.set_title(f"Image {j}")
+                    if j == 0:
+                        currAxes.text(-0.1, 0.5, folder, rotation=0, va='center', ha='center', transform=currAxes.transAxes)
+                    image_path = os.path.join(image_folder, image)
+                    img = mpimg.imread(image_path)
+                    currAxes.imshow(img, cmap='gray')
+                    currAxes.axis('off')
+                    
+            plt.tight_layout()
+            img_fn = os.path.join(args.samples_dir, prompt['name'] + ".png")
+            plt.savefig(img_fn, dpi=72)
+
+
+    def save_samples(args, global_step):
+        if accelerator.is_main_process:
+            if args.train_text_encoder:
+                text_enc_model = accelerator.unwrap_model(text_encoder)
+            else:
+                text_enc_model = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision)
+
+            scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False, set_alpha_to_one=False)
+            pipeline = StableDiffusionPipeline.from_pretrained(
+                args.pretrained_model_name_or_path,
+                unet=accelerator.unwrap_model(unet),
+                text_encoder=text_enc_model,
+                vae=AutoencoderKL.from_pretrained(
+                    args.pretrained_vae_name_or_path or args.pretrained_model_name_or_path,
+                    subfolder=None if args.pretrained_vae_name_or_path else "vae",
+                    revision=None if args.pretrained_vae_name_or_path else args.revision,
+                ),
+                safety_checker=None,
+                scheduler=scheduler,
+                torch_dtype=torch.float16,
+                revision=args.revision,
+            )
+
+            
+            pipeline = pipeline.to(accelerator.device)
+            g_cuda = torch.Generator(device=accelerator.device).manual_seed(args.seed)
+            pipeline.set_progress_bar_config(disable=True)
+            samples_dir = os.path.join(args.samples_dir, f"{global_step}")
+            os.makedirs(samples_dir, exist_ok=True)
+            with torch.autocast("cuda"), torch.inference_mode():
+                for prompt in args.save_sample_prompts:
+                    os.makedirs(os.path.join(samples_dir, prompt['name']), exist_ok=True)
+                    for i in tqdm(range(prompt['num']), desc=f"Generating samples for prompt: {prompt['name']}"):
                         images = pipeline(
-                            args.save_sample_prompt,
-                            negative_prompt=args.save_sample_negative_prompt,
+                            prompt['instance_prompt'],
+                            negative_prompt=prompt['negative_prompt'],
                             guidance_scale=args.save_guidance_scale,
                             num_inference_steps=args.save_infer_steps,
                             generator=g_cuda
                         ).images
-                        images[0].save(os.path.join(sample_dir, f"{i}.png"))
-                del pipeline
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            print(f"[*] Weights saved at {save_dir}")
+                        images[0].save(os.path.join(samples_dir, prompt['name'], f"{i}.png"))
+            del pipeline
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        
+            generate_sample_grids(args)
+
+            with open(os.path.join(args.samples_dir, "args.json"), "w") as f:
+                json.dump(args.__dict__, f, indent=2)
+            
+
 
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
@@ -804,6 +881,9 @@ def main(args):
 
             if global_step > 0 and not global_step % args.save_interval and global_step >= args.save_min_steps:
                 save_weights(global_step)
+            
+            if global_step % args.save_samples_interval == 0:
+                save_samples(args, global_step)
 
             progress_bar.update(1)
             global_step += 1
