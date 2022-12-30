@@ -803,8 +803,8 @@ def main(args):
             with open(os.path.join(args.samples_dir, "args.json"), "w") as f:
                 json.dump(args.__dict__, f, indent=2)
             
-            with open(os.path.join(args.save_sample_prompts, "prompts.json"), "w") as f:
-                json.dump(args.__dict__, f, indent=2)
+            with open(os.path.join(args.samples_dir, "prompts.json"), "w") as f:
+                json.dump(args.save_sample_prompts, f, indent=2)
 
 
     # Only show the progress bar once on each machine.
